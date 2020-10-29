@@ -8,33 +8,38 @@ Because SSHLibrary is primary used on Linux, tests should be ran at least on it.
 
 Setup on Linux
 ==============
- 
-- Install `openSSH` server (using apt-get on Debian variants):
+
+- Install OpenSSH server (using apt-get on Debian variants):
 
 ::
 
     sudo apt-get install openssh-server
 
-- Create a new user `test`:
+- Create a new user ``test``:
 
 ::
 
     sudo useradd test -m -s /bin/bash
 
-- With password `test`:
+- With password ``test``:
 
 ::
 
     sudo passwd test
     (input `test` as the new password)
 
-- Log in as `test`
+- Add ``test`` user to the sudoers list::
+
+    sudo adduser test sudo
+    (input `test` as UNIX password)
+
+- Log in as ``test``
 
 ::
-    
+
     sudo su test
 
-- Set prompt in .bashrc
+- Set prompt in ``.bashrc``
 
 ::
 
@@ -42,19 +47,19 @@ Setup on Linux
 
 - exit
 
-- Create a new user `testkey`:
+- Create a new user ``testkey``:
 
 ::
 
     sudo useradd -m testkey -s /bin/bash
 
-- Log in as `testkey`:
+- Log in as ``testkey``:
 
 ::
 
     sudo su testkey
 
-- Set prompt in .bashrc
+- Set prompt in `.bashrc`
 
 ::
 
@@ -73,13 +78,19 @@ Setup on Linux
 
     cp ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys
 
+- Make the key known to the ssh agent:
+
+::
+
+    ssh-add ~/.ssh/id_rsa
+
 - Log out, back to your normal user account:
 
 ::
 
     exit
 
-- Finally, copy `id_rsa` of user `testkey` into directory `atest/testdata/keyfiles`:
+- Finally, copy ``id_rsa`` of user ``testkey`` into directory ``atest/testdata/keyfiles``:
 
 ::
 
@@ -87,21 +98,54 @@ Setup on Linux
 
 - Change the rights for that file so that you can read it.
 
+Additional OpenSSH configuration
+################################
+
+- Open sshd configuration file ``/etc/ssh/sshd_config`` using a text editor
+
+- Add/edit the following lines:
+
+::
+
+    Banner /etc/ssh/sshd-banner # for testing pre-login banner
+    Subsystem subsys echo "Subsystem invoked." # for testing invoke_subsystem
+
+- Save file and restart the ssh server:
+
+::
+
+    sudo /etc/init.d/ssh restart
+
+- Create a new file ``/etc/ssh/sshd-banner`` containing:
+
+::
+
+    Testing pre-login banner
+
+
+- Add test_hostname in ``~/.ssh/config``
+
+::
+
+    echo $'Host test_hostname\n    Hostname localhost\n' >> ~/.ssh/config
+
+
 Setup in Windows
 ================
-The acceptance tests can also be run on windows against a ssh server running on Cygwin.
-
-You will need to install Cygwin with SSH server. Then add users test and testkey and follow the same steps as in linux to setup their bash accounts on Cygwin. After that you can execute the acceptance tests on Windows.
-
-The tests assume that Cygwin is installed to c:/cygwin64. If the installation irectory is different, it can be overridden with commadnline option `--variable CYGWIN_HOME:<the real path>`
+The acceptance tests can also be run on Windows. The recommended way is to use the WSL (Windows Subsystem for Linux) available in Windows 10.
 
 Running the acceptance tests
 ============================
 
-Tests also require robotstatuschecker:
+Tests also require ``robotstatuschecker``:
 
 ::
 
     pip install robotstatuschecker
- 
-Tests are ran using Bash script `python atest/run.py`. The script prints help when ran without parameters.
+
+Tests are ran using Bash script ``python atest/run.py``. The script prints help when ran without parameters.
+
+In order to run the tests with IPv6, the ``::1`` must be used as host variable when running ``atest/run.py`` script::
+
+    python atest/run.py --variable=HOST:::1 atest
+

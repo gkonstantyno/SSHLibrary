@@ -1,4 +1,5 @@
-#  Copyright 2008-2013 Nokia Siemens Networks Oyj
+#  Copyright 2008-2015 Nokia Networks
+#  Copyright 2016-     Robot Framework Foundation
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
 #  you may not use this file except in compliance with the License.
@@ -13,7 +14,8 @@
 #  limitations under the License.
 
 try:
-    from com.trilead.ssh2 import (Connection, SFTPException, SFTPv3Client,
+    from com.trilead.ssh2 import (Connection, SCPClient as JavaSCPClient,
+                                  SFTPException, SFTPv3Client,
                                   SFTPv3DirectoryEntry, StreamGobbler)
 except ImportError:
     raise ImportError(
@@ -21,13 +23,30 @@ except ImportError:
         'Make sure you have the Trilead JAR distribution in your CLASSPATH.'
     )
 import jarray
+import os
 from java.io import (BufferedReader, File, FileOutputStream, InputStreamReader,
                      IOException)
 
 from .abstractclient import (AbstractShell, AbstractSSHClient,
                              AbstractSFTPClient, AbstractCommand,
                              SSHClientException, SFTPFileInfo)
+try:
+    from robot.api import logger
+except ImportError:
+    logger = None
 
+
+class JavaSSHClientException(Exception):
+    pass
+
+
+def _wait_until_timeout(_shell, timeout):
+    timeout_condition = 1
+    rc = 32
+    condition = _shell.waitForCondition(rc , int(timeout) * 1000)
+
+    if condition & timeout_condition != 0:
+        raise SSHClientException("Timed out in %s seconds" % int(timeout))
 
 class JavaSSHClient(AbstractSSHClient):
 
@@ -41,11 +60,21 @@ class JavaSSHClient(AbstractSSHClient):
     def enable_logging(logfile):
         return False
 
-    def _login(self, username, password, look_for_keys='ignored'):
+    def _login(self, username, password, allow_agent='ignored', look_for_keys='ignored',
+               proxy_cmd=None, jumphost_alias_or_index=None, read_config_host=False):
+        if allow_agent or look_for_keys:
+            raise JavaSSHClientException("Arguments 'allow_agent', 'look_for_keys', and "
+                                         "`jumphost_index_or_alias` do not work with Jython.")
         if not self.client.authenticateWithPassword(username, password):
             raise SSHClientException
 
-    def _login_with_public_key(self, username, key_file, password):
+    def _login_with_public_key(self, username, key_file, password,
+                               allow_agent='ignored', look_for_keys='ignored',
+                               proxy_cmd=None, jumphost_alias_or_index=None,
+                               read_config_host=False):
+        if allow_agent or look_for_keys:
+            raise JavaSSHClientException("Arguments 'allow_agent', 'look_for_keys', and "
+                                         "`jumphost_index_or_alias` do not work with Jython.")
         try:
             success = self.client.authenticateWithPublicKey(username,
                                                             File(key_file),
@@ -56,18 +85,30 @@ class JavaSSHClient(AbstractSSHClient):
             # IOError is raised also when the keyfile is invalid
             raise SSHClientException
 
-    def _start_command(self, command):
-        cmd = RemoteCommand(command, self.config.encoding)
+    def _start_command(self, command, sudo=False, sudo_password=None, invoke_subsystem=False, forward_agent=False):
         new_shell = self.client.openSession()
-        cmd.run_in(new_shell)
+        if sudo:
+            new_shell.requestDumbPTY()
+        cmd = RemoteCommand(command, self.config.encoding)
+        cmd.run_in(new_shell, sudo, sudo_password, invoke_subsystem)
         return cmd
 
     def _create_sftp_client(self):
         return SFTPClient(self.client, self.config.encoding)
 
+    def _create_scp_transfer_client(self):
+        return SCPTransferClient(self.client, self.config.encoding)
+
+    def _create_scp_all_client(self):
+        return SCPClient(self.client)
+
     def _create_shell(self):
         return Shell(self.client, self.config.term_type,
                      self.config.width, self.config.height)
+
+    def create_local_ssh_tunnel(self, local_port, remote_host, remote_port, *args):
+        self.client.createLocalPortForwarder(int(local_port), remote_host, int(remote_port))
+        logger.info("Now forwarding port %s to %s:%s ..." % (local_port, remote_host, remote_port))
 
 
 class Shell(AbstractShell):
@@ -76,6 +117,7 @@ class Shell(AbstractShell):
         shell = client.openSession()
         shell.requestPTY(term_type, term_width, term_height, 0, 0, None)
         shell.startShell()
+        self.shell = shell
         self._stdout = shell.getStdout()
         self._stdin = shell.getStdin()
 
@@ -91,6 +133,10 @@ class Shell(AbstractShell):
              return chr(self._stdout.read())
          return ''
 
+    @staticmethod
+    def resize(width, height):
+        logger.warn('Setting width or height is not supported with Jython.')
+
     def _output_available(self):
         return self._stdout.available()
 
@@ -104,7 +150,7 @@ class SFTPClient(AbstractSFTPClient):
     def __init__(self, ssh_client, encoding):
         self._client = SFTPv3Client(ssh_client)
         self._client.setCharset(encoding)
-        super(SFTPClient, self).__init__()
+        super(SFTPClient, self).__init__(encoding)
 
     def _list(self, path):
         for item in self._client.ls(path):
@@ -131,7 +177,7 @@ class SFTPClient(AbstractSFTPClient):
     def _close_remote_file(self, remote_file):
         self._client.closeFile(remote_file)
 
-    def _get_file(self, remote_path, local_path):
+    def _get_file(self, remote_path, local_path, scp_preserve_times):
         local_file = FileOutputStream(local_path)
         remote_file_size = self._client.stat(remote_path).size
         remote_file = self._client.openFileRO(remote_path)
@@ -155,10 +201,48 @@ class SFTPClient(AbstractSFTPClient):
     def _absolute_path(self, path):
         return self._client.canonicalPath(path)
 
+    def _readlink(self, path):
+        return self._client.readLink(path)
+
+
+class SCPClient(object):
+    def __init__(self, ssh_client):
+        self._scp_client = JavaSCPClient(ssh_client)
+
+    def put_file(self, source, destination, *args):
+        self._scp_client.put(source, destination)
+
+    def get_file(self, source, destination, *args):
+        self._scp_client.get(source, destination)
+
+    def put_directory(self, source, destination, *args):
+        raise JavaSSHClientException('`Put Directory` not available with `scp=ALL` option. Try again with '
+                                     '`scp=TRANSFER` or `scp=OFF`.')
+
+    def get_directory(self, source, destination, *args):
+        raise JavaSSHClientException('`Get Directory` not available with `scp=ALL` option. Try again with '
+                                     '`scp=TRANSFER` or `scp=OFF`.')
+
+
+class SCPTransferClient(SFTPClient):
+
+    def __init__(self, ssh_client, encoding):
+        self._scp_client = JavaSCPClient(ssh_client)
+        super(SCPTransferClient, self).__init__(ssh_client, encoding)
+
+    def _put_file(self, source, destination, mode, newline, path_separator, scp_preserve_times):
+        self._create_remote_file(destination, mode)
+        self._scp_client.put(source, destination.rsplit(path_separator, 1)[0])
+
+    def _get_file(self, remote_path, local_path, scp_preserve_times):
+        self._scp_client.get(remote_path, local_path.rsplit(os.sep, 1)[0])
+
 
 class RemoteCommand(AbstractCommand):
 
-    def read_outputs(self):
+    def read_outputs(self, timeout=None, *args):
+        if timeout:
+            _wait_until_timeout(self._shell, timeout)
         stdout = self._read_from_stream(self._shell.getStdout())
         stderr = self._read_from_stream(self._shell.getStderr())
         rc = self._shell.getExitStatus() or 0
@@ -176,4 +260,17 @@ class RemoteCommand(AbstractCommand):
         return result
 
     def _execute(self):
-        self._shell.execCommand(self._command)
+        command = self._command.decode(self._encoding)
+        self._shell.execCommand(command)
+
+    def _execute_with_sudo(self, sudo_password=None):
+        command = 'sudo ' + self._command.decode(self._encoding)
+        if sudo_password is None:
+            self._shell.execCommand(command)
+        else:
+            self._shell.execCommand('echo %s | sudo --stdin --prompt "" %s' % (sudo_password, command))
+
+    def _invoke(self):
+        command = self._command.decode(self._encoding)
+        self._shell.startSubSystem(command)
+
